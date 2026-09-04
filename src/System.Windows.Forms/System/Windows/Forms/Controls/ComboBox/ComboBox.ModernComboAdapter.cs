@@ -92,6 +92,7 @@ public partial class ComboBox
                 graphics,
                 clientBounds);
             DrawDropDownButton(comboBox, graphics);
+            DrawSimpleEditListDivider(comboBox, graphics);
 
             switch (_flatStyle)
             {
@@ -139,10 +140,8 @@ public partial class ComboBox
             Rectangle clientBounds,
             Rectangle borderBounds)
         {
-            Color background = GetEffectiveBackColor(comboBox);
             Color borderColor = GetBorderColor(
                 comboBox,
-                background,
                 useAccent: false);
 
             CutOutRoundedCorners(
@@ -166,10 +165,8 @@ public partial class ComboBox
                 return;
             }
 
-            Color background = GetEffectiveBackColor(comboBox);
             Color borderColor = GetBorderColor(
                 comboBox,
-                background,
                 useAccent: false);
             using var pen = borderColor.GetCachedPenScope(
                 GetBorderThickness(comboBox));
@@ -182,10 +179,8 @@ public partial class ComboBox
             Rectangle clientBounds,
             Rectangle borderBounds)
         {
-            Color background = GetEffectiveBackColor(comboBox);
             Color borderColor = GetBorderColor(
                 comboBox,
-                background,
                 useAccent: true);
             CutOutRoundedCorners(
                 comboBox,
@@ -207,7 +202,7 @@ public partial class ComboBox
                 return;
             }
 
-            Color background = GetEffectiveBackColor(comboBox);
+            Color background = GetDropDownButtonBaseColor(comboBox);
             Color buttonColor = comboBox._mousePressed
                 ? PopupButtonColorMath.Blend(
                     background,
@@ -223,9 +218,7 @@ public partial class ComboBox
                         0.035f);
             if (!comboBox.Enabled)
             {
-                buttonColor = PopupButtonColorMath.Mute(
-                    buttonColor,
-                    0.55f);
+                buttonColor = ModernControlColorMath.GetDisabledSurfaceColor();
             }
 
             using (var brush = buttonColor.GetCachedSolidBrushScope())
@@ -235,9 +228,7 @@ public partial class ComboBox
 
             Color chevronColor = comboBox.Enabled
                 ? PopupButtonColorMath.GetReadableForeColor(buttonColor)
-                : ModernControlColorMath.GetDisabledTextColor(
-                    comboBox.ForeColor,
-                    buttonColor);
+                : ModernControlColorMath.GetDisabledForeColor(buttonColor);
             int halfWidth = Math.Max(
                 2,
                 ScaleHelper.ScaleToDpi(3, _deviceDpi));
@@ -261,6 +252,12 @@ public partial class ComboBox
             using var pen = chevronColor.GetCachedPenScope(stroke);
             graphics.DrawLines(pen, points);
         }
+
+        private static Color GetDropDownButtonBaseColor(ComboBox comboBox)
+            => Application.IsDarkModeEnabled
+                && comboBox.DarkModeRequestState is true
+                    ? SystemColors.ControlDark
+                    : SystemColors.Window;
 
         private void DrawDropDownListText(
             ComboBox comboBox,
@@ -316,9 +313,7 @@ public partial class ComboBox
                         ? comboBox.ForeColor
                         : PopupButtonColorMath.GetReadableForeColor(
                             background)
-                    : ModernControlColorMath.GetDisabledTextColor(
-                        comboBox.ForeColor,
-                        background);
+                    : ModernControlColorMath.GetDisabledForeColor(background);
             TextFormatFlags flags = TextFormatFlags.SingleLine
                 | TextFormatFlags.VerticalCenter
                 | TextFormatFlags.EndEllipsis
@@ -395,6 +390,45 @@ public partial class ComboBox
                 parentColor);
         }
 
+        private static void DrawSimpleEditListDivider(
+            ComboBox comboBox,
+            Graphics graphics)
+        {
+            if (comboBox.DropDownStyle != ComboBoxStyle.Simple
+                || comboBox._childListBox is null)
+            {
+                return;
+            }
+
+            Rectangle listBounds = comboBox.GetChildBounds(comboBox._childListBox.HWND);
+            if (listBounds.IsEmpty)
+            {
+                return;
+            }
+
+            int dividerThickness = Math.Max(
+                1,
+                ScaleHelper.ScaleToDpi(
+                    ModernControlVisualStyles.BorderThickness,
+                    comboBox.DeviceDpiInternal));
+            int lineY = listBounds.Top - dividerThickness;
+            if (lineY < 0)
+            {
+                return;
+            }
+
+            Padding chromeInsets = comboBox.GetModernChromeInsets();
+            int left = chromeInsets.Left + comboBox.Padding.Left;
+            int right = comboBox.ClientRectangle.Right - chromeInsets.Right - comboBox.Padding.Right - 1;
+            if (right < left)
+            {
+                return;
+            }
+
+            using var pen = Application.SystemVisualSettings.AccentColor.GetCachedPenScope(dividerThickness);
+            graphics.DrawLine(pen, left, lineY, right, lineY);
+        }
+
         private static void DrawRoundedBorder(
             ComboBox comboBox,
             Graphics graphics,
@@ -414,6 +448,7 @@ public partial class ComboBox
             Color parentColor = comboBox.ParentInternal?.BackColor
                 ?? SystemColors.Control;
             ParentBackgroundRenderer.PaintRoundedBorderRegionMitigation(
+                comboBox,
                 graphics,
                 bounds,
                 new Size(radius, radius),
@@ -421,20 +456,16 @@ public partial class ComboBox
                 parentColor);
         }
 
-        private static Color GetBorderColor(
-            ComboBox comboBox,
-            Color background,
-            bool useAccent)
+        private static Color GetBorderColor(ComboBox comboBox, bool useAccent)
         {
-            Color borderColor = useAccent
-                ? Application.SystemVisualSettings.AccentColor
-                : comboBox.ForeColor;
+            if (!comboBox.Enabled)
+            {
+                return ModernControlColorMath.GetDisabledBorderColor();
+            }
 
-            return comboBox.Enabled
-                ? borderColor
-                : ModernControlColorMath.GetDisabledTextColor(
-                    borderColor,
-                    background);
+            return useAccent
+                ? Application.SystemVisualSettings.AccentColor
+                : ModernControlColorMath.TextControlBorderColor;
         }
 
         private static int GetBorderThickness(ComboBox comboBox)
@@ -480,16 +511,13 @@ public partial class ComboBox
                     ?? SystemColors.Window;
 
         /// <summary>
-        ///  Returns the field surface color, muted when the ComboBox is disabled so a disabled
-        ///  control no longer shows its full custom <see cref="Control.BackColor"/> (issue #14797).
+        ///  Returns the field surface color. A disabled ComboBox does not honor user-set
+        ///  <see cref="Control.BackColor"/> values and uses the shared modern disabled surface
+        ///  instead, which adapts to the current color mode (issue #14797).
         /// </summary>
         private static Color GetEffectiveFieldColor(ComboBox comboBox)
-        {
-            Color background = GetEffectiveBackColor(comboBox);
-
-            return comboBox.Enabled
-                ? background
-                : PopupButtonColorMath.Mute(background, 0.55f);
-        }
+            => comboBox.Enabled
+                ? GetEffectiveBackColor(comboBox)
+                : ModernControlColorMath.GetDisabledSurfaceColor();
     }
 }

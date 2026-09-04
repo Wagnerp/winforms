@@ -1028,7 +1028,18 @@ public abstract partial class TextBoxBase : Control
 
         if (hasVScroll)
         {
-            padding.Right += SystemInformation.GetVerticalScrollBarWidthForDpi(DeviceDpiInternal);
+            WINDOW_EX_STYLE exStyle = (WINDOW_EX_STYLE)PInvokeCore.GetWindowLong(
+                this,
+                WINDOW_LONG_PTR_INDEX.GWL_EXSTYLE);
+
+            if ((exStyle & WINDOW_EX_STYLE.WS_EX_LEFTSCROLLBAR) != 0)
+            {
+                padding.Left += SystemInformation.GetVerticalScrollBarWidthForDpi(DeviceDpiInternal);
+            }
+            else
+            {
+                padding.Right += SystemInformation.GetVerticalScrollBarWidthForDpi(DeviceDpiInternal);
+            }
         }
 
         return padding;
@@ -2652,10 +2663,11 @@ public abstract partial class TextBoxBase : Control
         int borderThickness = Math.Max(focusBorderMetrics.Width, focusBorderMetrics.Height);
         int focusBandHeight = GetVisualStylesFocusBandHeight();
 
-        Color adornerColor = ForeColor;
-
         Color clientBackColor = BackColor;
         Color parentBackColor = Parent?.BackColor ?? BackColor;
+        Color adornerColor = Enabled
+            ? ModernControlColorMath.TextControlBorderColor
+            : ModernControlColorMath.GetDisabledBorderColor();
 
         using var clientBackgroundBrush = clientBackColor.GetCachedSolidBrushScope();
         using var adornerBrush = adornerColor.GetCachedSolidBrushScope();
@@ -2740,6 +2752,7 @@ public abstract partial class TextBoxBase : Control
                     // The rounded chrome is clipped with a non-antialiased region; blend the resulting
                     // corner artifacts into the parent by tracing the parent color just outside the border.
                     ParentBackgroundRenderer.PaintRoundedBorderRegionMitigation(
+                        this,
                         offscreenGraphics,
                         deflatedBounds,
                         new Size(cornerRadius, cornerRadius),

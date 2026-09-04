@@ -288,6 +288,64 @@ public class ComboBoxTests
     }
 
     [WinFormsFact]
+    public void ComboBox_ModernVisualStyles_FlatStyleTransitionToSystem_RecreatesHandle()
+    {
+        using SystemVisualSettingsTestScope settingsScope = new(
+            clientAreaAnimationEnabled: false,
+            highContrastEnabled: false);
+        using Panel parent = new();
+        using VisualStylesComboBox control = new()
+        {
+            FlatStyle = FlatStyle.Standard,
+            VisualStylesMode = VisualStylesMode.Net11
+        };
+        parent.Controls.Add(control);
+        parent.CreateControl();
+        control.CreateControl();
+
+        int handleCreatedCallCount = 0;
+        int handleDestroyedCallCount = 0;
+        control.HandleCreated += (sender, e) => handleCreatedCallCount++;
+        control.HandleDestroyed += (sender, e) => handleDestroyedCallCount++;
+
+        control.FlatStyle = FlatStyle.System;
+
+        Assert.True(control.IsHandleCreated);
+        Assert.Equal(1, handleDestroyedCallCount);
+        Assert.Equal(1, handleCreatedCallCount);
+        Assert.IsType<FlatComboAdapter>(control.CreateAdapter());
+    }
+
+    [WinFormsFact]
+    public void ComboBox_ModernVisualStyles_SystemModeBoundaryChangeWithHandle_RecreatesHandle()
+    {
+        using SystemVisualSettingsTestScope settingsScope = new(
+            clientAreaAnimationEnabled: false,
+            highContrastEnabled: false);
+        using Panel parent = new();
+        using VisualStylesComboBox control = new()
+        {
+            FlatStyle = FlatStyle.System,
+            VisualStylesMode = VisualStylesMode.Classic
+        };
+        parent.Controls.Add(control);
+        parent.CreateControl();
+        control.CreateControl();
+
+        int handleCreatedCallCount = 0;
+        int handleDestroyedCallCount = 0;
+        control.HandleCreated += (sender, e) => handleCreatedCallCount++;
+        control.HandleDestroyed += (sender, e) => handleDestroyedCallCount++;
+
+        control.VisualStylesMode = VisualStylesMode.Net11;
+
+        Assert.True(control.IsHandleCreated);
+        Assert.Equal(1, handleDestroyedCallCount);
+        Assert.Equal(1, handleCreatedCallCount);
+        Assert.IsType<FlatComboAdapter>(control.CreateAdapter());
+    }
+
+    [WinFormsFact]
     public void ComboBox_ModernVisualStyles_ModeChangeRemeasuresAutoSizeRow()
     {
         SystemVisualSettings previous =
@@ -497,13 +555,13 @@ public class ComboBoxTests
             control.ClientSize.Height);
         using Graphics graphics = Graphics.FromImage(actual);
         var adapter =
-            (ComboBox.ModernComboAdapter)control.CreateAdapter();
+            (ModernComboAdapter)control.CreateAdapter();
 
         adapter.DrawFlatCombo(control, graphics);
 
         Color expectedBorder = usesAccent
             ? Application.SystemVisualSettings.AccentColor
-            : control.ForeColor;
+            : ModernControlColorMath.TextControlBorderColor;
         Assert.True(
             CountPixels(
                 actual,
@@ -514,6 +572,144 @@ public class ComboBoxTests
                 ? expectedBorder.ToArgb()
                 : parent.BackColor.ToArgb(),
             actual.GetPixel(0, 0).ToArgb());
+    }
+
+    /// <summary>
+    ///  When Enabled is set to <see langword="false"/> in NET11 VisualStylesMode, the modern
+    ///  adapter must render the field with the shared disabled surface rather than the
+    ///  user-supplied <see cref="Control.BackColor"/>.
+    /// </summary>
+    [WinFormsTheory]
+    [InlineData(FlatStyle.Standard, ComboBoxStyle.DropDown)]
+    [InlineData(FlatStyle.Flat, ComboBoxStyle.DropDown)]
+    [InlineData(FlatStyle.Popup, ComboBoxStyle.DropDown)]
+    [InlineData(FlatStyle.Standard, ComboBoxStyle.DropDownList)]
+    [InlineData(FlatStyle.Flat, ComboBoxStyle.DropDownList)]
+    [InlineData(FlatStyle.Popup, ComboBoxStyle.DropDownList)]
+    public void ComboBox_ModernVisualStyles_Disabled_UsesDisabledSurfaceInsteadOfBackColor(
+        FlatStyle flatStyle,
+        ComboBoxStyle dropDownStyle)
+    {
+        using SystemVisualSettingsTestScope settingsScope = new(
+            clientAreaAnimationEnabled: false,
+            highContrastEnabled: false);
+        using Panel parent = new()
+        {
+            BackColor = Color.White,
+            Size = new Size(120, 60)
+        };
+
+        // Use a highly saturated color so it is clearly distinguishable from the disabled surface.
+        Color customBackColor = Color.Yellow;
+        using VisualStylesComboBox control = new()
+        {
+            BackColor = customBackColor,
+            DropDownStyle = dropDownStyle,
+            FlatStyle = flatStyle,
+            Size = new Size(100, 36),
+            VisualStylesMode = VisualStylesMode.Net11
+        };
+        parent.Controls.Add(control);
+        parent.CreateControl();
+        control.CreateControl();
+
+        // Verify the enabled render shows the custom BackColor in the field area.
+        var adapterEnabled = (ModernComboAdapter)control.CreateAdapter();
+        using Bitmap enabledBitmap = new(control.ClientSize.Width, control.ClientSize.Height);
+        using (Graphics g = Graphics.FromImage(enabledBitmap))
+        {
+            adapterEnabled.DrawFlatCombo(control, g);
+        }
+
+        // Verify the disabled render does NOT show the full custom BackColor.
+        control.Enabled = false;
+        var adapterDisabled = (ModernComboAdapter)control.CreateAdapter();
+        using Bitmap disabledBitmap = new(control.ClientSize.Width, control.ClientSize.Height);
+        using (Graphics g = Graphics.FromImage(disabledBitmap))
+        {
+            adapterDisabled.DrawFlatCombo(control, g);
+        }
+
+        // The enabled bitmap should contain pixels that are close to the original BackColor.
+        Assert.True(
+            CountPixels(enabledBitmap, customBackColor, channelTolerance: 20) > 0,
+            "Enabled ComboBox should render field with the BackColor.");
+
+        // The disabled bitmap must NOT contain the user BackColor, and must instead use the
+        // shared modern disabled surface (issue #14797).
+        Assert.True(
+            CountPixels(disabledBitmap, customBackColor, channelTolerance: 20) == 0,
+            "Disabled ComboBox must not render field with the BackColor.");
+        Assert.True(
+            CountPixels(
+                disabledBitmap,
+                ModernControlColorMath.GetDisabledSurfaceColor(),
+                channelTolerance: 4) > 0,
+            "Disabled ComboBox should render field with the disabled surface color.");
+    }
+
+    /// <summary>
+    ///  The drop-down button chevron and border must also use the disabled color palette
+    ///  when the ComboBox is disabled in NET11 VisualStylesMode.
+    /// </summary>
+    [WinFormsTheory]
+    [InlineData(FlatStyle.Standard)]
+    [InlineData(FlatStyle.Flat)]
+    [InlineData(FlatStyle.Popup)]
+    public void ComboBox_ModernVisualStyles_Disabled_UsesDisabledBorderAndButtonColors(
+        FlatStyle flatStyle)
+    {
+        using SystemVisualSettingsTestScope settingsScope = new(
+            clientAreaAnimationEnabled: false,
+            highContrastEnabled: false,
+            focusBorderMetrics: new Size(2, 2));
+        using Panel parent = new()
+        {
+            BackColor = Color.White,
+            Size = new Size(120, 60)
+        };
+        Color customForeColor = Color.Blue;
+        using VisualStylesComboBox control = new()
+        {
+            BackColor = Color.White,
+            FlatStyle = flatStyle,
+            ForeColor = customForeColor,
+            Size = new Size(100, 36),
+            VisualStylesMode = VisualStylesMode.Net11
+        };
+        parent.Controls.Add(control);
+        parent.CreateControl();
+        control.CreateControl();
+
+        // Enabled border should contain the custom ForeColor (for Standard/Flat).
+        var adapterEnabled = (ModernComboAdapter)control.CreateAdapter();
+        using Bitmap enabledBitmap = new(control.ClientSize.Width, control.ClientSize.Height);
+        using (Graphics g = Graphics.FromImage(enabledBitmap))
+        {
+            adapterEnabled.DrawFlatCombo(control, g);
+        }
+
+        // Disabled border must NOT use the raw ForeColor.
+        control.Enabled = false;
+        var adapterDisabled = (ModernComboAdapter)control.CreateAdapter();
+        using Bitmap disabledBitmap = new(control.ClientSize.Width, control.ClientSize.Height);
+        using (Graphics g = Graphics.FromImage(disabledBitmap))
+        {
+            adapterDisabled.DrawFlatCombo(control, g);
+        }
+
+        if (flatStyle != FlatStyle.Popup)
+        {
+            Assert.True(
+                CountPixels(enabledBitmap, ModernControlColorMath.TextControlBorderColor, channelTolerance: 16) > 0,
+                "Enabled ComboBox should render border with TextControlBorderColor.");
+            Assert.True(
+                CountPixels(
+                    disabledBitmap,
+                    ModernControlColorMath.GetDisabledBorderColor(),
+                    channelTolerance: 8) > 0,
+                "Disabled ComboBox should render border with the disabled border color.");
+        }
     }
 
     [WinFormsFact]
@@ -598,6 +794,39 @@ public class ComboBoxTests
     [WinFormsTheory]
     [InlineData(ComboBoxStyle.DropDown)]
     [InlineData(ComboBoxStyle.Simple)]
+    public void ComboBox_ModernVisualStyles_EditHeightDoesNotClipText(
+        ComboBoxStyle dropDownStyle)
+    {
+        using SystemVisualSettingsTestScope settingsScope = new(
+            clientAreaAnimationEnabled: false,
+            highContrastEnabled: false);
+        using VisualStylesComboBox control = new()
+        {
+            DropDownStyle = dropDownStyle,
+            FlatStyle = FlatStyle.Standard,
+            Size = dropDownStyle == ComboBoxStyle.Simple
+                ? new Size(140, 100)
+                : new Size(140, 40),
+            Text = "Text with descenders: gjpqy",
+            VisualStylesMode = VisualStylesMode.Net11
+        };
+
+        control.CreateControl();
+        _ = control.Handle;
+        Rectangle nativeEditBounds = control.ModernEditBaseBounds;
+        Assert.False(nativeEditBounds.IsEmpty);
+
+        // Modern layout may reduce edit-window height versus native baseline because the
+        // field now reserves explicit top/bottom inset, but text must still remain readable.
+        Rectangle editBounds = control.GetEditBounds();
+        Assert.True(
+            editBounds.Height >= control.FontHeight,
+            $"DropDownStyle={dropDownStyle}, EditHeight={editBounds.Height}, FontHeight={control.FontHeight}, NativeEditHeight={nativeEditBounds.Height}, SelectionHeight={control.GetSelectionHeight()}, PreferredHeight={control.PreferredHeight}, ControlHeight={control.Height}");
+    }
+
+    [WinFormsTheory]
+    [InlineData(ComboBoxStyle.DropDown)]
+    [InlineData(ComboBoxStyle.Simple)]
     public void ComboBox_ModernPadding_PositionsEditUsingTopAndBottom(
         ComboBoxStyle dropDownStyle)
     {
@@ -625,17 +854,20 @@ public class ComboBoxTests
         Assert.True(
             bottomWeightedBounds.Top
                 > topWeightedBounds.Top);
-        Assert.Equal(
-            topWeightedBounds.Height,
-            bottomWeightedBounds.Height);
         if (dropDownStyle == ComboBoxStyle.Simple)
         {
+            Assert.True(bottomWeightedBounds.Height >= control.FontHeight);
             Rectangle listBounds = control.GetListBounds();
-            Assert.Equal(
-                bottomWeightedBounds.Bottom
-                    + control.ModernChromeInsets.Bottom
-                    + control.Padding.Bottom,
-                listBounds.Top);
+            Assert.True(
+                listBounds.Top
+                    > bottomWeightedBounds.Bottom);
+        }
+        else
+        {
+            Assert.InRange(
+                bottomWeightedBounds.Height,
+                topWeightedBounds.Height - 2,
+                topWeightedBounds.Height + 2);
         }
     }
 
@@ -842,11 +1074,14 @@ public class ComboBoxTests
         Assert.True(
             resizedListBounds.Bottom
                 > initialListBounds.Bottom);
-        Assert.Equal(
-            control.GetEditBounds().Bottom
-                + control.ModernChromeInsets.Bottom
-                + control.Padding.Bottom,
-            resizedListBounds.Top);
+        Assert.True(
+            resizedListBounds.Top
+                > control.GetEditBounds().Bottom);
+        Assert.True(
+            resizedListBounds.Top
+                <= control.GetEditBounds().Bottom
+                    + control.ModernChromeInsets.Bottom
+                    + control.Padding.Bottom);
     }
 
     [WinFormsFact]
@@ -1081,11 +1316,13 @@ public class ComboBoxTests
 
         Rectangle updatedEditBounds = control.GetEditBounds();
         Assert.NotEqual(initialEditBounds.Height, updatedEditBounds.Height);
-        Assert.Equal(
-            updatedEditBounds.Bottom
-                + control.ModernChromeInsets.Bottom
-                + control.Padding.Bottom,
-            control.GetListBounds().Top);
+        int listTop = control.GetListBounds().Top;
+        Assert.True(listTop > updatedEditBounds.Bottom);
+        Assert.True(
+            listTop
+                <= updatedEditBounds.Bottom
+                    + control.ModernChromeInsets.Bottom
+                    + control.Padding.Bottom);
         int writeCount = control.ModernComboLayoutWriteCount;
         var state = GetNativeComboState(control);
 
@@ -1214,6 +1451,178 @@ public class ComboBoxTests
     }
 
     [WinFormsFact]
+    public void ComboBox_ModernSimple_EditFillsAvailableFieldWidth()
+    {
+        using SystemVisualSettingsTestScope settingsScope = new(
+            clientAreaAnimationEnabled: false,
+            highContrastEnabled: false);
+        using VisualStylesComboBox control = new()
+        {
+            DropDownStyle = ComboBoxStyle.Simple,
+            FlatStyle = FlatStyle.Standard,
+            Padding = Padding.Empty,
+            Size = new Size(180, 120),
+            VisualStylesMode = VisualStylesMode.Net11
+        };
+        control.CreateControl();
+
+        Rectangle editBounds = control.GetEditBounds();
+        Padding chromeInsets = control.ModernChromeInsets;
+        int expectedLeft = chromeInsets.Left;
+        int expectedRight = control.ClientRectangle.Right - chromeInsets.Right;
+
+        Assert.InRange(editBounds.Left, expectedLeft - 1, expectedLeft + 1);
+        Assert.InRange(editBounds.Right, expectedRight - 1, expectedRight + 1);
+    }
+
+    [WinFormsFact]
+    public void ComboBox_ModernSimple_ListFillsAvailableFieldWidth()
+    {
+        using SystemVisualSettingsTestScope settingsScope = new(
+            clientAreaAnimationEnabled: false,
+            highContrastEnabled: false);
+        using VisualStylesComboBox control = new()
+        {
+            DropDownStyle = ComboBoxStyle.Simple,
+            FlatStyle = FlatStyle.Standard,
+            Padding = Padding.Empty,
+            Size = new Size(180, 120),
+            VisualStylesMode = VisualStylesMode.Net11
+        };
+        control.Items.AddRange(["one", "two", "three", "four", "five", "six", "seven", "eight"]);
+        control.CreateControl();
+
+        Rectangle listBounds = control.GetListBounds();
+        Padding chromeInsets = control.ModernChromeInsets;
+        int expectedLeft = chromeInsets.Left;
+        int expectedRight = control.ClientRectangle.Right - chromeInsets.Right;
+
+        Assert.True(listBounds.Left <= expectedLeft);
+        Assert.True(listBounds.Right >= expectedRight - 1);
+    }
+
+    [WinFormsFact]
+    public void ComboBox_ModernSimple_EditAndList_DoNotOverlapAndFitFont()
+    {
+        using SystemVisualSettingsTestScope settingsScope = new(
+            clientAreaAnimationEnabled: false,
+            highContrastEnabled: false);
+        using Font font = new(Control.DefaultFont.FontFamily, 14f);
+        using VisualStylesComboBox control = new()
+        {
+            DropDownStyle = ComboBoxStyle.Simple,
+            FlatStyle = FlatStyle.Standard,
+            Font = font,
+            Padding = Padding.Empty,
+            Size = new Size(220, 140),
+            VisualStylesMode = VisualStylesMode.Net11
+        };
+        control.Items.AddRange(["one", "two", "three", "four", "five", "six", "seven", "eight"]);
+        control.CreateControl();
+
+        Rectangle editBounds = control.GetEditBounds();
+        Rectangle listBounds = control.GetListBounds();
+
+        Assert.True(editBounds.Height >= control.FontHeight);
+        Assert.True(listBounds.Top > editBounds.Bottom);
+    }
+
+    [WinFormsFact]
+    public void ComboBox_ModernSimple_ListIsBorderlessAndFillsRoundedField()
+    {
+        using SystemVisualSettingsTestScope settingsScope = new(
+            clientAreaAnimationEnabled: false,
+            highContrastEnabled: false);
+        using VisualStylesComboBox control = new()
+        {
+            DropDownStyle = ComboBoxStyle.Simple,
+            FlatStyle = FlatStyle.Standard,
+            Padding = Padding.Empty,
+            Size = new Size(220, 140),
+            VisualStylesMode = VisualStylesMode.Net11
+        };
+        control.Items.AddRange(["one", "two", "three", "four", "five", "six", "seven", "eight"]);
+        control.CreateControl();
+
+        Rectangle listBounds = control.GetListBounds();
+
+        Assert.False(control.ListHasBorderStyle());
+        Assert.False(control.ListHasClientEdgeExStyle());
+        Assert.True(listBounds.Left <= control.ModernChromeInsets.Left);
+        Assert.True(listBounds.Right >= control.ClientRectangle.Right - control.ModernChromeInsets.Right - 1);
+    }
+
+    [WinFormsFact]
+    public void ComboBox_ModernSimple_ApplyModernLayout_ReappliesBorderlessListSurface()
+    {
+        using SystemVisualSettingsTestScope settingsScope = new(
+            clientAreaAnimationEnabled: false,
+            highContrastEnabled: false);
+        using VisualStylesComboBox control = new()
+        {
+            DropDownStyle = ComboBoxStyle.Simple,
+            FlatStyle = FlatStyle.Standard,
+            Padding = Padding.Empty,
+            Size = new Size(220, 140),
+            VisualStylesMode = VisualStylesMode.Net11
+        };
+        control.Items.AddRange(["one", "two", "three", "four", "five", "six", "seven", "eight"]);
+        control.CreateControl();
+
+        Assert.False(control.ListHasBorderStyle());
+        Assert.False(control.ListHasClientEdgeExStyle());
+
+        control.ReapplyListBorderAndClientEdgeStyles();
+        Assert.True(control.ListHasBorderStyle());
+        Assert.True(control.ListHasClientEdgeExStyle());
+
+        control.ApplyModernComboLayout();
+
+        Assert.False(control.ListHasBorderStyle());
+        Assert.False(control.ListHasClientEdgeExStyle());
+    }
+
+    [WinFormsFact]
+    public void ComboBox_ModernSimple_DrawsAccentDividerBetweenEditAndList()
+    {
+        using SystemVisualSettingsTestScope settingsScope = new(
+            clientAreaAnimationEnabled: false,
+            highContrastEnabled: false);
+        using VisualStylesComboBox control = new()
+        {
+            DropDownStyle = ComboBoxStyle.Simple,
+            FlatStyle = FlatStyle.Standard,
+            Padding = Padding.Empty,
+            Size = new Size(220, 140),
+            VisualStylesMode = VisualStylesMode.Net11
+        };
+        control.Items.AddRange(["one", "two", "three", "four", "five", "six", "seven", "eight"]);
+        control.CreateControl();
+        using Bitmap bitmap = new(control.Width, control.Height);
+
+        control.DrawToBitmap(bitmap, new Rectangle(Point.Empty, control.Size));
+
+        Rectangle listBounds = control.GetListBounds();
+        int dividerThickness = control.ModernSimpleDividerThickness;
+        int sampleX = Math.Clamp(control.Width / 2, 0, control.Width - 1);
+        int startY = Math.Max(0, listBounds.Top - dividerThickness);
+        int endY = Math.Min(control.Height - 1, listBounds.Top + 1);
+        bool foundDivider = false;
+
+        for (int y = startY; y <= endY; y++)
+        {
+            Color pixel = bitmap.GetPixel(sampleX, y);
+            if (ColorsAreClose(pixel, Application.SystemVisualSettings.AccentColor, channelTolerance: 3))
+            {
+                foundDivider = true;
+                break;
+            }
+        }
+
+        Assert.True(foundDivider);
+    }
+
+    [WinFormsFact]
     public void ComboBox_ModernSimple_RepeatedMetricChangeDoesNotAccumulatePadding()
     {
         SystemVisualSettings previous =
@@ -1266,6 +1675,41 @@ public class ComboBoxTests
         }
     }
 
+    [WinFormsFact]
+    public void ComboBox_ModernSimple_ApplyModernLayout_DoesNotReapplyUnchangedClipRegion()
+    {
+        using SystemVisualSettingsTestScope settingsScope = new(
+            clientAreaAnimationEnabled: false,
+            highContrastEnabled: false);
+        using VisualStylesComboBox control = new()
+        {
+            DropDownStyle = ComboBoxStyle.Simple,
+            FlatStyle = FlatStyle.Standard,
+            Padding = Padding.Empty,
+            Size = new Size(220, 140),
+            VisualStylesMode = VisualStylesMode.Net11
+        };
+        control.Items.AddRange(["one", "two", "three", "four", "five", "six", "seven", "eight"]);
+        control.CreateControl();
+
+        int initialApplyCount = control.ModernSimpleListClipRegionApplyCount;
+
+        control.ApplyModernComboLayout();
+        int stableApplyCount = control.ModernSimpleListClipRegionApplyCount;
+
+        Assert.Equal(initialApplyCount, stableApplyCount);
+
+        control.Height += 20;
+
+        Assert.True(control.ModernSimpleListClipRegionApplyCount > stableApplyCount);
+
+        int resizedApplyCount = control.ModernSimpleListClipRegionApplyCount;
+
+        control.ApplyModernComboLayout();
+
+        Assert.Equal(resizedApplyCount, control.ModernSimpleListClipRegionApplyCount);
+    }
+
     [Theory]
     [InlineData(10, 0, 21999, false)]
     [InlineData(10, 0, 22000, true)]
@@ -1278,7 +1722,7 @@ public class ComboBoxTests
     {
         Assert.Equal(
             expected,
-            ComboBox.SupportsModernDropDownCorners(
+            SupportsModernDropDownCorners(
                 new Version(major, minor, build)));
     }
 
@@ -1316,6 +1760,49 @@ public class ComboBoxTests
         Assert.Equal(0, createParams.Y);
         Assert.Same(createParams, control.CreateParams);
         Assert.False(control.IsHandleCreated);
+    }
+
+    [WinFormsFact]
+    public void ComboBox_CreateParams_Net11Simple_ContainsVScroll()
+    {
+        using SubComboBox control = new()
+        {
+            VisualStylesMode = VisualStylesMode.Net11,
+            DropDownStyle = ComboBoxStyle.Simple
+        };
+
+        CreateParams createParams = control.CreateParams;
+
+        Assert.NotEqual(0, createParams.Style & (int)WINDOW_STYLE.WS_VSCROLL);
+    }
+
+    [WinFormsFact]
+    public void ComboBox_CreateParams_Net11Simple_ContainsNoIntegralHeight()
+    {
+        using SubComboBox control = new()
+        {
+            VisualStylesMode = VisualStylesMode.Net11,
+            DropDownStyle = ComboBoxStyle.Simple
+        };
+
+        CreateParams createParams = control.CreateParams;
+
+        Assert.NotEqual(0, createParams.Style & PInvoke.CBS_NOINTEGRALHEIGHT);
+    }
+
+    [WinFormsFact]
+    public void ComboBox_CreateParams_Net11SimpleWithExplicitIntegralHeight_StillForcesNoIntegralHeight()
+    {
+        using SubComboBox control = new()
+        {
+            VisualStylesMode = VisualStylesMode.Net11,
+            DropDownStyle = ComboBoxStyle.Simple,
+            IntegralHeight = true
+        };
+
+        CreateParams createParams = control.CreateParams;
+
+        Assert.NotEqual(0, createParams.Style & PInvoke.CBS_NOINTEGRALHEIGHT);
     }
 
     [WinFormsTheory]
@@ -3978,7 +4465,7 @@ public class ComboBoxTests
     private sealed class VisualStylesComboBox : SubComboBox
     {
         public FlatComboAdapter CreateAdapter()
-            => base.CreateFlatComboAdapterInstance();
+            => CreateFlatComboAdapterInstance();
 
         public (int left, int right) GetEditMargins()
         {
@@ -4046,6 +4533,61 @@ public class ComboBoxTests
                 comboBoxInfo.rcButton.Height);
         }
 
+        public bool ListHasBorderStyle()
+        {
+            COMBOBOXINFO comboBoxInfo = GetComboBoxInfo();
+            WINDOW_STYLE listStyle = (WINDOW_STYLE)PInvokeCore.GetWindowLong(
+                comboBoxInfo.hwndList,
+                WINDOW_LONG_PTR_INDEX.GWL_STYLE);
+
+            return (listStyle & WINDOW_STYLE.WS_BORDER) != 0;
+        }
+
+        public bool ListHasClientEdgeExStyle()
+        {
+            COMBOBOXINFO comboBoxInfo = GetComboBoxInfo();
+            WINDOW_EX_STYLE listExStyle = (WINDOW_EX_STYLE)PInvokeCore.GetWindowLong(
+                comboBoxInfo.hwndList,
+                WINDOW_LONG_PTR_INDEX.GWL_EXSTYLE);
+
+            return (listExStyle & WINDOW_EX_STYLE.WS_EX_CLIENTEDGE) != 0;
+        }
+
+        public void ReapplyListBorderAndClientEdgeStyles()
+        {
+            COMBOBOXINFO comboBoxInfo = GetComboBoxInfo();
+            HWND listHandle = comboBoxInfo.hwndList;
+
+            WINDOW_STYLE style = (WINDOW_STYLE)PInvokeCore.GetWindowLong(
+                listHandle,
+                WINDOW_LONG_PTR_INDEX.GWL_STYLE);
+            WINDOW_EX_STYLE exStyle = (WINDOW_EX_STYLE)PInvokeCore.GetWindowLong(
+                listHandle,
+                WINDOW_LONG_PTR_INDEX.GWL_EXSTYLE);
+
+            PInvokeCore.SetWindowLong(
+                listHandle,
+                WINDOW_LONG_PTR_INDEX.GWL_STYLE,
+                (nint)(style | WINDOW_STYLE.WS_BORDER));
+            PInvokeCore.SetWindowLong(
+                listHandle,
+                WINDOW_LONG_PTR_INDEX.GWL_EXSTYLE,
+                (nint)(exStyle | WINDOW_EX_STYLE.WS_EX_CLIENTEDGE));
+
+            PInvoke.SetWindowPos(
+                listHandle,
+                HWND.Null,
+                0,
+                0,
+                0,
+                0,
+                SET_WINDOW_POS_FLAGS.SWP_NOMOVE
+                    | SET_WINDOW_POS_FLAGS.SWP_NOSIZE
+                    | SET_WINDOW_POS_FLAGS.SWP_NOZORDER
+                    | SET_WINDOW_POS_FLAGS.SWP_NOACTIVATE
+                    | SET_WINDOW_POS_FLAGS.SWP_FRAMECHANGED);
+        }
+
         private unsafe COMBOBOXINFO GetComboBoxInfo()
         {
             COMBOBOXINFO comboBoxInfo = default;
@@ -4075,6 +4617,14 @@ public class ComboBoxTests
             => (int)this.TestAccessor.Dynamic
                 .GetModernComboLayoutWriteCount();
 
+        public int ModernSimpleListClipRegionApplyCount
+            => (int)this.TestAccessor.Dynamic
+                .GetModernSimpleListClipRegionApplyCount();
+
+        public int ModernSimpleDividerThickness
+            => (int)this.TestAccessor.Dynamic
+                .GetModernSimpleDividerThickness();
+
         public int NativeSelectionHeight
             => (int)this.TestAccessor.Dynamic
                 .GetNativeComboBaselineSelectionFieldItemHeight();
@@ -4090,7 +4640,7 @@ public class ComboBoxTests
 
         public void RaiseSystemVisualSettingsChanged(
             SystemVisualSettingsChangedEventArgs e)
-            => base.OnSystemVisualSettingsChanged(e);
+            => OnSystemVisualSettingsChanged(e);
 
         internal override bool IsHighContrast => false;
     }
